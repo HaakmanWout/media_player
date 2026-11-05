@@ -64,3 +64,5 @@ fastlane/test_output
 build/
 venv/
 __pycache__/
+*.py
+*.txt
