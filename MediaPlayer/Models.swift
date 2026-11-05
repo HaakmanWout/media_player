@@ -32,7 +32,6 @@ struct Episode: Codable, Identifiable, Hashable, Sendable {
     var pubDate: Date?
     var duration: TimeInterval?
     var audioURL: URL
-    var summary: String?
     var imageURL: URL?
 }
 

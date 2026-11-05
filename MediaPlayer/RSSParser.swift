@@ -32,7 +32,6 @@ final class RSSParser: NSObject, XMLParserDelegate {
     private var itemDate: Date?
     private var itemDuration: TimeInterval?
     private var itemAudio: URL?
-    private var itemSummary: String?
     private var itemImage: URL?
 
     static func parse(_ data: Data) throws -> ParsedFeed {
@@ -54,7 +53,7 @@ final class RSSParser: NSObject, XMLParserDelegate {
         case "item":
             inItem = true
             itemTitle = ""; itemGUID = nil; itemDate = nil; itemDuration = nil
-            itemAudio = nil; itemSummary = nil; itemImage = nil
+            itemAudio = nil; itemImage = nil
         case "enclosure" where inItem:
             let type = attributes["type"] ?? "audio"
             if let href = attributes["url"], type.hasPrefix("audio") || type.isEmpty || href.lowercased().contains(".mp3") {
@@ -89,8 +88,6 @@ final class RSSParser: NSObject, XMLParserDelegate {
             case "guid": itemGUID = value.isEmpty ? nil : value
             case "pubDate": itemDate = Self.parseDate(value)
             case "itunes:duration": itemDuration = Self.parseDuration(value)
-            case "itunes:summary", "description":
-                if itemSummary == nil || name == "description" { itemSummary = value.strippingHTML }
             case "item":
                 inItem = false
                 if let audio = itemAudio {
@@ -100,7 +97,6 @@ final class RSSParser: NSObject, XMLParserDelegate {
                         pubDate: itemDate,
                         duration: itemDuration,
                         audioURL: audio,
-                        summary: itemSummary,
                         imageURL: itemImage
                     ))
                 }

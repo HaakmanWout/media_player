@@ -252,8 +252,24 @@ struct FeedDetailView: View {
                             EpisodeRow(track: track, progress: store.progress(for: track.id), isCurrent: player.current?.id == track.id)
                         }
                         .buttonStyle(.plain)
-                        DownloadButton(trackID: track.id) {
-                            downloads.download(episode, in: feed)
+                        if player.failedTrackID == track.id {
+                            Button {
+                                player.play([track])
+                            } label: {
+                                CrossEyedFace()
+                                    .frame(width: 24, height: 24)
+                            }
+                            .buttonStyle(.borderless)
+                            .frame(width: 32, height: 32)
+                            .accessibilityLabel("Couldn't play episode. Try again")
+                        } else if player.isLoading, player.current?.id == track.id {
+                            ProgressView()
+                                .frame(width: 32, height: 32)
+                                .accessibilityLabel("Loading")
+                        } else {
+                            DownloadButton(trackID: track.id) {
+                                downloads.download(episode, in: feed)
+                            }
                         }
                     }
                     .swipeActions(edge: .leading) {
@@ -437,6 +453,32 @@ private struct SpinningArc: View {
             .rotationEffect(.degrees(spinning ? 360 : 0))
             .animation(.linear(duration: 0.9).repeatForever(autoreverses: false), value: spinning)
             .onAppear { spinning = true }
+    }
+}
+
+/// Shown when an episode can't be played: a frowning face with crosses for eyes.
+private struct CrossEyedFace: View {
+    private struct Face: Shape {
+        func path(in rect: CGRect) -> Path {
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: rect.minX + x * rect.width, y: rect.minY + y * rect.height)
+            }
+            var path = Path()
+            path.addEllipse(in: rect.insetBy(dx: 1, dy: 1))
+            for eyeX in [0.34, 0.66] {
+                path.move(to: point(eyeX - 0.08, 0.32))
+                path.addLine(to: point(eyeX + 0.08, 0.48))
+                path.move(to: point(eyeX + 0.08, 0.32))
+                path.addLine(to: point(eyeX - 0.08, 0.48))
+            }
+            path.move(to: point(0.32, 0.73))
+            path.addQuadCurve(to: point(0.68, 0.73), control: point(0.5, 0.58))
+            return path
+        }
+    }
+
+    var body: some View {
+        Face().stroke(Color.red, style: StrokeStyle(lineWidth: 2, lineCap: .round))
     }
 }
 

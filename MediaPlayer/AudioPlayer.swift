@@ -12,15 +12,14 @@ final class AudioPlayer: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
-    @Published var podcastRate: Float = UserDefaults.standard.object(forKey: "podcastRate") as? Float ?? 1.0 {
-        didSet {
-            UserDefaults.standard.set(podcastRate, forKey: "podcastRate")
-            applyRate()
-        }
-    }
+    /// True while the player is waiting on the network, e.g. a stream starting up or rebuffering.
+    @Published private(set) var isLoading = false
+    /// The track that just failed to play; cleared shortly after, or when a track is loaded again.
+    @Published private(set) var failedTrackID: String?
 
     static let skipBack: TimeInterval = 15
     static let skipForward: TimeInterval = 30
+    static let failureDisplayTime: Duration = .seconds(5)
 
     var podcastStore: PodcastStore?
     var downloads: DownloadManager?
@@ -28,9 +27,12 @@ final class AudioPlayer: ObservableObject {
     private let player = AVPlayer()
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
+    private var itemStatusObservation: NSKeyValueObservation?
     private var notificationTokens: [NSObjectProtocol] = []
     private var artwork: UIImage?
     private var lastProgressSave = Date.distantPast
+    private var currentItemFailed = false
+    private var failureResetTask: Task<Void, Never>?
 
     var hasNext: Bool { index + 1 < queue.count }
 
@@ -44,9 +46,12 @@ final class AudioPlayer: ObservableObject {
             MainActor.assumeIsolated { self?.tick(time) }
         }
         statusObservation = player.observe(\.timeControlStatus) { [weak self] player, _ in
-            let playing = player.timeControlStatus != .paused
+            let status = player.timeControlStatus
             Task { @MainActor in
-                guard let self, self.isPlaying != playing else { return }
+                guard let self else { return }
+                self.isLoading = status == .waitingToPlayAtSpecifiedRate
+                let playing = status != .paused
+                guard self.isPlaying != playing else { return }
                 self.isPlaying = playing
                 if !playing { self.saveProgress() }
                 self.updateNowPlaying()
@@ -59,6 +64,15 @@ final class AudioPlayer: ObservableObject {
         ) { [weak self] note in
             let item = note.object as? AVPlayerItem
             MainActor.assumeIsolated { self?.itemDidFinish(item) }
+        })
+        notificationTokens.append(center.addObserver(
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let item = note.object as? AVPlayerItem
+            MainActor.assumeIsolated {
+                guard let self, let item, item === self.player.currentItem else { return }
+                self.playbackFailed()
+            }
         })
         notificationTokens.append(center.addObserver(
             forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
@@ -82,7 +96,12 @@ final class AudioPlayer: ObservableObject {
     }
 
     func resume() {
-        guard current != nil else { return }
+        guard let current else { return }
+        // A failed item can't be restarted, so pressing play tries the track again from scratch.
+        if currentItemFailed {
+            load(current)
+            return
+        }
         try? AVAudioSession.sharedInstance().setActive(true)
         player.play()
     }
@@ -128,9 +147,19 @@ final class AudioPlayer: ObservableObject {
         artwork = nil
         duration = track.duration ?? 0
         currentTime = 0
+        failedTrackID = nil
+        currentItemFailed = false
+        failureResetTask?.cancel()
 
         let item = AVPlayerItem(url: downloads?.localURL(for: track.id) ?? track.url)
-        item.audioTimePitchAlgorithm = .timeDomain
+        let trackID = track.id
+        itemStatusObservation = item.observe(\.status) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            Task { @MainActor in
+                guard let self, self.current?.id == trackID else { return }
+                self.playbackFailed()
+            }
+        }
         player.replaceCurrentItem(with: item)
 
         if track.isPodcast, let store = podcastStore {
@@ -142,7 +171,6 @@ final class AudioPlayer: ObservableObject {
             }
         }
 
-        applyRate()
         updateCommandAvailability()
         resume()
         updateNowPlaying()
@@ -155,11 +183,17 @@ final class AudioPlayer: ObservableObject {
         }
     }
 
-    private func applyRate() {
-        let rate = current?.isPodcast == true ? podcastRate : 1
-        player.defaultRate = rate
-        if isPlaying { player.rate = rate }
-        updateNowPlaying()
+    private func playbackFailed() {
+        failedTrackID = current?.id
+        currentItemFailed = true
+        isLoading = false
+        pause()
+        failureResetTask?.cancel()
+        failureResetTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.failureDisplayTime)
+            guard !Task.isCancelled else { return }
+            self?.failedTrackID = nil
+        }
     }
 
     private func tick(_ time: CMTime) {
@@ -247,8 +281,8 @@ final class AudioPlayer: ObservableObject {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(player.defaultRate) : 0,
-            MPNowPlayingInfoPropertyDefaultPlaybackRate: Double(player.defaultRate),
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
         if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
