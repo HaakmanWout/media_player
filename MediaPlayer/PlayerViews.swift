@@ -131,16 +131,20 @@ struct MiniPlayer: View {
     }
 }
 
+private final class ScrubState: ObservableObject {
+    @Published var isActive = false
+    @Published var time: TimeInterval = 0
+}
+
 struct NowPlayingView: View {
     @EnvironmentObject private var player: AudioPlayer
     @Environment(\.dismiss) private var dismiss
-    @State private var scrubTime: TimeInterval = 0
-    @State private var isScrubbing = false
+    @StateObject private var scrub = ScrubState()
 
     var body: some View {
         let track = player.current
         let isPodcast = track?.isPodcast == true
-        let shownTime = isScrubbing ? scrubTime : player.currentTime
+        let shownTime = scrub.isActive ? scrub.time : player.currentTime
 
         VStack(spacing: 0) {
             Spacer(minLength: 24)
@@ -167,15 +171,15 @@ struct NowPlayingView: View {
 
             VStack(spacing: 4) {
                 Slider(
-                    value: Binding(get: { shownTime }, set: { scrubTime = $0 }),
+                    value: Binding(get: { shownTime }, set: { scrub.time = $0 }),
                     in: 0...max(player.duration, 1)
                 ) { editing in
                     if editing {
-                        scrubTime = player.currentTime
-                        isScrubbing = true
-                    } else {
-                        player.seek(to: scrubTime)
-                        isScrubbing = false
+                        scrub.time = player.currentTime
+                        scrub.isActive = true
+                    } else if scrub.isActive {
+                        player.seek(to: scrub.time)
+                        scrub.isActive = false
                     }
                 }
                 HStack {
@@ -212,6 +216,7 @@ struct NowPlayingView: View {
         .padding(.bottom, 16)
         .tint(.primary)
         .presentationDragIndicator(.visible)
+        .onChange(of: track?.id) { scrub.isActive = false }
         .onChange(of: player.current == nil) { _, isEmpty in
             if isEmpty { dismiss() }
         }
