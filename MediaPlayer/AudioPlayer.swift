@@ -32,6 +32,7 @@ final class AudioPlayer: ObservableObject {
     private var artwork: UIImage?
     private var lastProgressSave = Date.distantPast
     private var currentItemFailed = false
+    private var activeSeek: UUID?
     private var failureResetTask: Task<Void, Never>?
     private let sessionFile = URL.applicationSupportDirectory.appending(path: "playback.json")
 
@@ -145,7 +146,7 @@ final class AudioPlayer: ObservableObject {
     func seek(to time: TimeInterval) {
         let clamped = max(0, duration > 0 ? min(time, duration) : time)
         currentTime = clamped
-        player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
+        startSeek(to: clamped)
         updateNowPlaying()
         saveProgress()
     }
@@ -195,6 +196,7 @@ final class AudioPlayer: ObservableObject {
         failedTrackID = nil
         currentItemFailed = false
         failureResetTask?.cancel()
+        activeSeek = nil
 
         let item = AVPlayerItem(url: downloads?.localURL(for: track.id) ?? track.url)
         let trackID = track.id
@@ -212,11 +214,11 @@ final class AudioPlayer: ObservableObject {
             let nearEnd = duration > 0 && saved.position > duration - 15
             if saved.position > 5, !nearEnd {
                 currentTime = saved.position
-                player.seek(to: CMTime(seconds: saved.position, preferredTimescale: 600))
+                startSeek(to: saved.position)
             }
         } else if resumeAt > 0 {
             currentTime = resumeAt
-            player.seek(to: CMTime(seconds: resumeAt, preferredTimescale: 600))
+            startSeek(to: resumeAt)
         }
 
         updateCommandAvailability()
@@ -229,6 +231,17 @@ final class AudioPlayer: ObservableObject {
             guard current?.id == track.id else { return }
             artwork = image
             updateNowPlaying()
+        }
+    }
+
+    /// Until a seek completes the player still reports the old position, which `tick` has to ignore.
+    private func startSeek(to time: TimeInterval) {
+        let id = UUID()
+        activeSeek = id
+        player.seek(to: CMTime(seconds: time, preferredTimescale: 600)) { [weak self] _ in
+            Task { @MainActor in
+                if self?.activeSeek == id { self?.activeSeek = nil }
+            }
         }
     }
 
@@ -252,7 +265,7 @@ final class AudioPlayer: ObservableObject {
             updateNowPlaying()
         }
         let seconds = time.seconds
-        if seconds.isFinite { currentTime = seconds }
+        if seconds.isFinite, activeSeek == nil { currentTime = seconds }
         if isPlaying, Date.now.timeIntervalSince(lastProgressSave) > 10 {
             saveProgress()
         }
