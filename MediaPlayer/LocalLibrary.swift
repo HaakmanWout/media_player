@@ -128,7 +128,11 @@ final class LocalLibrary: ObservableObject {
 
         // Only read tags for files that are new or changed since the last scan.
         let changed = scan.files.filter { metadataCache[$0.url.path]?.modified != $0.modified }
-        let fresh = await Self.loadTracks(changed.map(\.url), root: folder, kind: kind)
+        // Detached so a cancelled caller can't make the tag reads fail and cache file names as titles.
+        let changedURLs = changed.map(\.url)
+        let fresh = await Task.detached(priority: .userInitiated) {
+            await Self.loadTracks(changedURLs, root: folder, kind: kind)
+        }.value
         let freshByPath = Dictionary(fresh.map { ($0.url.path, $0) }, uniquingKeysWith: { first, _ in first })
         var cache: [String: (modified: Date?, track: Track)] = [:]
         for file in scan.files {
@@ -144,7 +148,7 @@ final class LocalLibrary: ObservableObject {
             loaded = downloads.resolve(loaded.map { (String($0.id.dropFirst(prefix.count)), $0) })
         }
 
-        tracks = loaded.sorted {
+        let sorted = loaded.sorted {
             if kind == .podcasts {
                 if let a = $0.date, let b = $1.date, a != b { return a > b }
                 return $0.title.localizedStandardCompare($1.title) == .orderedAscending
@@ -152,8 +156,12 @@ final class LocalLibrary: ObservableObject {
             // Music follows the file names (and so the folder structure), e.g. "01 Intro.mp3", "02 …".
             return $0.id.localizedStandardCompare($1.id) == .orderedAscending
         }
-        playlists = Self.playlists(from: tracks, folders: scan.folders)
+        let grouped = Self.playlists(from: sorted, folders: scan.folders)
         pendingDownloads = scan.pending
+        // Rescans happen regularly and usually find nothing new, so leave the views alone in that case.
+        guard sorted != tracks || grouped != playlists else { return }
+        tracks = sorted
+        playlists = grouped
 
         // Warm the artwork for what's on screen first: the top of the podcast list, and each playlist's
         // mosaic plus its first screenful of songs.

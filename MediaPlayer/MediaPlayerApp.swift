@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct MediaPlayerApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var player: AudioPlayer
     @StateObject private var podcasts: PodcastStore
     @StateObject private var downloads: DownloadManager
@@ -37,6 +38,14 @@ struct MediaPlayerApp: App {
     }
 }
 
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// iOS relaunches the app in the background when downloads finish while it isn't running.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        DownloadManager.backgroundCompletion = completionHandler
+    }
+}
+
 struct RootView: View {
     @ObservedObject var music: LocalLibrary
     @ObservedObject var localPodcasts: LocalLibrary
@@ -61,6 +70,25 @@ struct RootView: View {
                 async let episodes: Void = localPodcasts.reload()
                 _ = await (songs, episodes)
             }
+            .task(id: music.hasLoaded && localPodcasts.hasLoaded) {
+                // Tracks can only be looked up once both folders have been scanned.
+                guard music.hasLoaded, localPodcasts.hasLoaded else { return }
+                let episodes = podcasts.feeds.flatMap { feed in feed.episodes.map(feed.track(for:)) }
+                player.restoreSession(from: music.tracks + localPodcasts.tracks + episodes)
+            }
+            .task(id: scenePhase) {
+                // Notice files whose names or tags change while the app is open.
+                guard scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(15))
+                    guard !Task.isCancelled else { return }
+                    async let songs: Void = music.reload()
+                    async let episodes: Void = localPodcasts.reload()
+                    _ = await (songs, episodes)
+                }
+            }
+            .onChange(of: music.tracks) { _, tracks in player.refreshTracks(tracks) }
+            .onChange(of: localPodcasts.tracks) { _, tracks in player.refreshTracks(tracks) }
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active else { return }
                 // The appearance may have been changed in the Settings app while we were in the background.

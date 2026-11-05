@@ -2,7 +2,8 @@ import Foundation
 
 /// Downloads RSS episodes into the podcasts folder, next to the user's own MP3s. A small index remembers
 /// which file belongs to which episode, so downloaded files keep the episode's identity (progress,
-/// played state, artwork) when the folder is scanned.
+/// played state, artwork) when the folder is scanned. Transfers run in a background session, so they carry
+/// on when the app is suspended or iOS terminates it.
 @MainActor
 final class DownloadManager: NSObject, ObservableObject {
     struct Record: Codable, Identifiable, Hashable {
@@ -32,7 +33,15 @@ final class DownloadManager: NSObject, ObservableObject {
     private let indexFile: URL
     private var tasks: [String: URLSessionDownloadTask] = [:]
     private var pending: [Int: Record] = [:]
-    private lazy var session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.background(withIdentifier: "com.wouthaakman.MediaPlayer.downloads")
+        configuration.isDiscretionary = false
+        configuration.sessionSendsLaunchEvents = true
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+    }()
+
+    /// Handed over by iOS when it wakes the app for finished downloads; called once they're all processed.
+    static var backgroundCompletion: (() -> Void)?
 
     override init() {
         let support = URL.applicationSupportDirectory
@@ -45,6 +54,29 @@ final class DownloadManager: NSObject, ObservableObject {
            let saved = try? JSONDecoder().decode([String: Record].self, from: data) {
             records = saved
         }
+        reconnectTasks()
+    }
+
+    /// Picks up transfers that kept running while the app wasn't.
+    private func reconnectTasks() {
+        Task {
+            for case let task as URLSessionDownloadTask in await session.allTasks where task.state == .running {
+                guard let record = pendingRecord(for: task) else { continue }
+                let total = task.countOfBytesExpectedToReceive
+                progress[record.id] = .some(total > 0 ? Double(task.countOfBytesReceived) / Double(total) : nil)
+            }
+        }
+    }
+
+    /// The record for a task. It's stored on the task too, because a task can outlive the app's memory.
+    private func pendingRecord(for task: URLSessionTask) -> Record? {
+        if let record = pending[task.taskIdentifier] { return record }
+        guard let data = task.taskDescription?.data(using: .utf8),
+              let record = try? JSONDecoder().decode(Record.self, from: data)
+        else { return nil }
+        pending[task.taskIdentifier] = record
+        tasks[record.id] = task as? URLSessionDownloadTask
+        return record
     }
 
     func state(for trackID: String) -> State {
@@ -74,6 +106,7 @@ final class DownloadManager: NSObject, ObservableObject {
             duration: track.duration
         )
         let task = session.downloadTask(with: episode.audioURL)
+        task.taskDescription = (try? JSONEncoder().encode(record)).map { String(decoding: $0, as: UTF8.self) }
         tasks[track.id] = task
         pending[task.taskIdentifier] = record
         progress[track.id] = .some(nil)
@@ -165,7 +198,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                                 totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         MainActor.assumeIsolated {
-            guard let record = pending[downloadTask.taskIdentifier] else { return }
+            guard let record = pendingRecord(for: downloadTask) else { return }
             let fraction = totalBytesExpectedToWrite > 0
                 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : nil
             progress[record.id] = .some(fraction)
@@ -174,7 +207,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         MainActor.assumeIsolated {
-            guard var record = pending[downloadTask.taskIdentifier] else { return }
+            guard var record = pendingRecord(for: downloadTask) else { return }
             if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 errorMessage = "“\(record.title)” couldn't be downloaded (HTTP \(http.statusCode))."
                 return
@@ -198,12 +231,20 @@ extension DownloadManager: URLSessionDownloadDelegate {
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         MainActor.assumeIsolated {
-            guard let record = pending.removeValue(forKey: task.taskIdentifier) else { return }
+            guard let record = pendingRecord(for: task) else { return }
+            pending[task.taskIdentifier] = nil
             if let error, (error as? URLError)?.code != .cancelled {
                 errorMessage = "“\(record.title)” couldn't be downloaded: \(error.localizedDescription)"
             }
             tasks[record.id] = nil
             progress[record.id] = nil
+        }
+    }
+
+    nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        Task { @MainActor in
+            Self.backgroundCompletion?()
+            Self.backgroundCompletion = nil
         }
     }
 }

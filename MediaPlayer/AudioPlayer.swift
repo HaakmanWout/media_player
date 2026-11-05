@@ -33,6 +33,15 @@ final class AudioPlayer: ObservableObject {
     private var lastProgressSave = Date.distantPast
     private var currentItemFailed = false
     private var failureResetTask: Task<Void, Never>?
+    private let sessionFile = URL.applicationSupportDirectory.appending(path: "playback.json")
+
+    /// What was playing, so it can be picked up again after a relaunch. Tracks are stored by ID and looked
+    /// up again on restore, because file locations and tags can change between launches.
+    private struct PlaybackSession: Codable {
+        var queue: [String]
+        var currentID: String
+        var position: TimeInterval
+    }
 
     var hasNext: Bool { index + 1 < queue.count }
 
@@ -114,6 +123,10 @@ final class AudioPlayer: ObservableObject {
         if hasNext {
             index += 1
             load(queue[index])
+        } else if current?.isPodcast == false {
+            // Music starts the playlist over when it reaches the end.
+            index = 0
+            load(queue[index])
         } else {
             pause()
             seek(to: 0)
@@ -141,7 +154,39 @@ final class AudioPlayer: ObservableObject {
         seek(to: currentTime + seconds)
     }
 
-    private func load(_ track: Track) {
+    /// Puts back the track and queue from the last run, paused where it was. `available` is every track
+    /// the libraries and feeds know about; anything no longer among them is left out.
+    func restoreSession(from available: [Track]) {
+        guard current == nil,
+              let data = try? Data(contentsOf: sessionFile),
+              let session = try? JSONDecoder().decode(PlaybackSession.self, from: data)
+        else { return }
+        let byID = Dictionary(available.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let tracks = session.queue.compactMap { byID[$0] }
+        guard let start = tracks.firstIndex(where: { $0.id == session.currentID }) else { return }
+        queue = tracks
+        index = start
+        load(tracks[start], resumeAt: session.position, autoplay: false)
+    }
+
+    /// Picks up changes from a library rescan: new tags on queued tracks, and files that have gone.
+    func refreshTracks(_ tracks: [Track]) {
+        let fresh = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let currentID = current?.id
+        // A renamed or deleted file can't be played any more, unless it's already playing.
+        queue = queue.map { fresh[$0.id] ?? $0 }.filter {
+            !$0.isLocal || $0.id == currentID || FileManager.default.fileExists(atPath: $0.url.path)
+        }
+        guard let currentID else { return }
+        index = queue.firstIndex { $0.id == currentID } ?? 0
+        if let updated = fresh[currentID], updated != current {
+            current = updated
+            updateNowPlaying()
+        }
+        saveSession()
+    }
+
+    private func load(_ track: Track, resumeAt: TimeInterval = 0, autoplay: Bool = true) {
         saveProgress()
         current = track
         artwork = nil
@@ -169,11 +214,15 @@ final class AudioPlayer: ObservableObject {
                 currentTime = saved.position
                 player.seek(to: CMTime(seconds: saved.position, preferredTimescale: 600))
             }
+        } else if resumeAt > 0 {
+            currentTime = resumeAt
+            player.seek(to: CMTime(seconds: resumeAt, preferredTimescale: 600))
         }
 
         updateCommandAvailability()
-        resume()
+        if autoplay { resume() }
         updateNowPlaying()
+        saveSession()
 
         Task {
             let image = await ArtworkLoader.shared.image(for: track, size: .large)
@@ -221,12 +270,22 @@ final class AudioPlayer: ObservableObject {
     }
 
     private func saveProgress() {
-        guard let track = current, track.isPodcast, let store = podcastStore, currentTime > 0 else { return }
+        guard let track = current else { return }
         lastProgressSave = .now
+        saveSession()
+        guard track.isPodcast, let store = podcastStore, currentTime > 0 else { return }
         if duration > 0, currentTime > duration - 15 {
             store.setPlayed(true, for: track.id)
         } else {
             store.setPosition(currentTime, for: track.id)
+        }
+    }
+
+    private func saveSession() {
+        guard let current else { return }
+        let session = PlaybackSession(queue: queue.map(\.id), currentID: current.id, position: currentTime)
+        if let data = try? JSONEncoder().encode(session) {
+            try? data.write(to: sessionFile, options: .atomic)
         }
     }
 

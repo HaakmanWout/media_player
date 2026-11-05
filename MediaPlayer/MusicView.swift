@@ -59,14 +59,9 @@ private struct PlaylistRow: View {
         HStack(spacing: 12) {
             PlaylistArtwork(tracks: playlist.tracks, cornerRadius: 8)
                 .frame(width: 56, height: 56)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(playlist.name)
-                    .font(.headline)
-                    .lineLimit(2)
-                Text(playlist.tracks.count == 1 ? "1 song" : "\(playlist.tracks.count) songs")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
+            Text(playlist.name)
+                .font(.headline)
+                .lineLimit(2)
         }
     }
 }
@@ -126,9 +121,6 @@ struct PlaylistView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                } header: {
-                    Text(tracks.count == 1 ? "1 Song" : "\(tracks.count) Songs")
-                        .listRowInsets(.cardAligned)
                 }
             }
             .navigationTitle(playlist.name)

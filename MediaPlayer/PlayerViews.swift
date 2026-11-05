@@ -122,7 +122,6 @@ struct MiniPlayer: View {
                 } label: {
                     Image(systemName: "forward.fill").font(.title3).frame(width: 36, height: 36)
                 }
-                .disabled(!player.hasNext)
             }
         }
         .buttonStyle(.plain)
@@ -204,17 +203,10 @@ struct NowPlayingView: View {
                     controlButton("goforward.30", size: 32) { player.skip(by: AudioPlayer.skipForward) }
                 } else {
                     controlButton("forward.fill", size: 32) { player.next() }
-                        .disabled(!player.hasNext)
                 }
                 Spacer()
             }
             .padding(.vertical, 28)
-
-            if !isPodcast, player.queue.count > 1 {
-                Text("\(player.index + 1) of \(player.queue.count)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
         }
         .padding(.horizontal, 28)
         .padding(.bottom, 16)
